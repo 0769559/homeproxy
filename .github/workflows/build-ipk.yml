@@ -15,8 +15,10 @@ on:
 jobs:
   build-ipk:
     runs-on: ubuntu-22.04
+    # 增加虚拟机资源（解决编译资源不足）
+    env:
+      MAKEFLAGS: "-j1"  # 单线程编译，避免内存耗尽
     steps:
-      # 1. 基础环境初始化（仅保留必要步骤）
       - name: Install Dependencies
         run: |
           sudo apt update -y
@@ -24,47 +26,45 @@ jobs:
           gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev file wget \
           libelf-dev libtool-bin autoconf automake texinfo patch pkg-config curl swig
 
-      # 2. 克隆源码 + 配置HomeProxy Feed（移除所有校验）
       - name: Clone Source & Configure Feed
         run: |
           rm -rf immortalwrt && mkdir -p immortalwrt && cd immortalwrt
-          # 直接克隆分支，无任何校验
           git clone --branch=${{ github.event.inputs.immortalwrt_branch }} https://github.com/immortalwrt/immortalwrt.git .
-          # 配置HomeProxy Feed（仅保留核心格式）
           sed -i '/homeproxy/d' feeds.conf.default
           echo "src-git homeproxy https://github.com/immortalwrt/homeproxy.git^${{ github.event.inputs.homeproxy_commit }}" >> feeds.conf.default
-          # 更新feeds（无容错，直接执行）
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      # 3. 配置编译（纯手动生成ipq60xx配置，无文件依赖）
       - name: Configure Build
         run: |
           cd immortalwrt
-          # 直接写入ipq60xx架构核心配置，无任何目录/文件校验
           cat > .config << EOF
           CONFIG_TARGET_qualcommax=y
           CONFIG_TARGET_qualcommax_ipq60xx=y
           CONFIG_TARGET_DEVICE_qualcommax_ipq60xx_DEVICE_generic=y
           CONFIG_ARCH_PACKAGES="aarch64_cortex-a53"
           CONFIG_DEVEL=y
+          # 仅编译HomeProxy相关IPK，减少编译量
+          CONFIG_PACKAGE_luci-app-homeproxy=y
+          CONFIG_PACKAGE_homeproxy=y
+          # 关闭不必要的编译选项，降低复杂度
+          CONFIG_ALL_NONSHARED=n
+          CONFIG_ALL_KMODS=n
+          CONFIG_ALL_PACKAGES=n
           EOF
           make defconfig
 
-      # 4. 下载依赖 + 编译IPK（移除多余清理/调试）
       - name: Compile IPK
         run: |
           cd immortalwrt
-          # 下载依赖
           make download -j$(nproc)
-          # 预编译po2lmo（仅核心命令）
+          # 预编译po2lmo
           pushd feeds/packages/utils/po2lmo
           make && sudo make install
           popd
-          # 编译IPK
-          make package/compile -j$(nproc) V=s
+          # 核心修复：增加详细日志，单线程编译
+          make package/compile -j1 V=sc  # V=sc 输出最详细的编译日志，定位具体错误
 
-      # 5. 上传产物（保留核心功能）
       - name: Upload IPK
         uses: actions/upload-artifact@v4
         with:
