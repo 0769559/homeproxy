@@ -2,6 +2,7 @@ name: Build ipk for HomeProxy
 
 on:
   push:
+  workflow_dispatch:  # 新增「手动触发」的规则
     branches:
       - 'master'
       - 'dev'
