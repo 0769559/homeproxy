@@ -1,116 +1,133 @@
 name: Build ipk for HomeProxy
 
 on:
-  workflow_dispatch:
-    inputs:
-      immortalwrt_branch:
-        description: 'ImmortalWRT 分支（如 immortalwrt-23.05）'
-        required: true
-        default: 'immortalwrt-23.05'
-      homeproxy_commit:
-        description: 'HomeProxy Commit Hash（如 7c7badc）'
-        required: true
-        default: '7c7badc'
-      target_arch:
-        description: '目标架构（如 aarch64_generic）'
-        required: true
-        default: 'aarch64_generic'
+  push:
+    branches:
+      - 'master'
+      - 'dev'
+    paths:
+      - 'htdocs/**'
+      - 'po/**'
+      - 'root/**'
+      - 'Makefile'
+      - '.github/**'
+      - '!.github/ISSUE_TEMPLATE/**'
+
+  pull_request:
+    branches:
+      - 'master'
+      - 'dev'
+    types:
+      - opened
+      - synchronize
+      - reopened
+    paths:
+      - 'htdocs/**'
+      - 'root/**'
+      - 'Makefile'
+      - '.github/**'
+      - '!.github/ISSUE_TEMPLATE/**'
+
+  release:
+    types:
+      - published
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout source tree
+        uses: actions/checkout@v5
+
+      - name: Checkout apk
+        uses: actions/checkout@v5
         with:
+          repository: 'alpinelinux/apk-tools'
+          path: 'apk-tools'
           fetch-depth: 0
+          ref: 'd093f7c198a64bff0cd58afeaf638909fda24ca8'
 
-      - name: Install Dependencies
-        run: |
-          sudo apt update && sudo apt upgrade -y
-          sudo apt install -y build-essential clang flex bison g++ gawk gcc-multilib \
-          gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev \
-          file wget curl
-
-      - name: Clone ImmortalWRT Source
-        run: |
-          mkdir -p immortalwrt && cd immortalwrt
-          # 克隆 ImmortalWRT 源码（匹配你的设备）
-          git clone -b ${{ github.event.inputs.immortalwrt_branch }} https://github.com/immortalwrt/immortalwrt.git .
-          # 添加指定 Commit Hash 的 HomeProxy feed（锁定7c7badc版本）
-          echo "src-git homeproxy https://github.com/immortalwrt/homeproxy.git;${{ github.event.inputs.homeproxy_commit }}" >> feeds.conf.default
-          # 替换国内镜像源加速下载
-          sed -i 's#downloads.immortalwrt.org#mirrors.pku.edu.cn/immortalwrt#' ./feeds.conf.default
-          # 更新并安装 feeds
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
-
-      - name: Configure Build
-        run: |
-          cd immortalwrt
-          # 配置 aarch64_generic 架构（匹配你的ARMv8设备）
-          echo "CONFIG_TARGET_armvirt=y
-          CONFIG_TARGET_armvirt_64=y
-          CONFIG_TARGET_armvirt_64_Default=y
-          # 启用 HomeProxy 及依赖（编译为ipk包）
-          CONFIG_PACKAGE_luci-app-homeproxy=m
-          CONFIG_PACKAGE_homeproxy=m
-          CONFIG_PACKAGE_sing-box=m
-          CONFIG_PACKAGE_v2ray-geodata=m
-          # 关闭不必要的编译项加速编译
-          CONFIG_BUILD_OPTIMIZE=y
-          CONFIG_STRIP_ALL=y" > .config
-          
-          # 加载并验证配置
-          make defconfig
-
-      - name: Download Dependencies
-        run: |
-          cd immortalwrt
-          # 下载依赖包（失败自动重试）
-          make download -j$(nproc) || make download -j1 V=s
-
-      - name: Build HomeProxy
-        run: |
-          cd immortalwrt
-          # 编译 HomeProxy 相关ipk包（显示详细日志）
-          make package/luci-app-homeproxy/compile V=s -j$(nproc)
-          make package/homeproxy/compile V=s -j$(nproc)
-
-      - name: Prepare Release Files
-        run: |
-          # 整理编译产物，方便上传
-          mkdir -p release-files
-          cp immortalwrt/bin/packages/**/luci-app-homeproxy_*.ipk release-files/
-          cp immortalwrt/bin/packages/**/homeproxy_*.ipk release-files/
-          # 列出产物确认
-          ls -l release-files/
-
-      - name: Upload IPK Artifact
-        uses: actions/upload-artifact@v4
+      - name: Checkout po2lmo
+        uses: actions/checkout@v5
         with:
-          name: homeproxy-${{ github.event.inputs.target_arch }}-${{ github.event.inputs.homeproxy_commit }}
-          path: release-files/*.ipk
-          retention-days: 90  # Artifact保留90天
+          repository: 'openwrt/luci'
+          path: 'po2lmo'
+          sparse-checkout: |
+            modules/luci-base/src
+            build/i18n-scan.pl
+            build/i18n-update.pl
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          # Release标签（包含版本和架构，便于识别）
-          tag_name: homeproxy-${{ github.event.inputs.homeproxy_commit }}-${{ github.event.inputs.target_arch }}
-          # Release标题
-          name: HomeProxy ${{ github.event.inputs.homeproxy_commit }} (${{ github.event.inputs.target_arch }})
-          # Release描述
-          body: |
-            🚀 自动编译的 HomeProxy IPK 包
-            - Commit Hash: ${{ github.event.inputs.homeproxy_commit }}
-            - 架构: ${{ github.event.inputs.target_arch }}
-            - ImmortalWRT 分支: ${{ github.event.inputs.immortalwrt_branch }}
-            - 编译时间: ${{ github.run_at }}
-          # 上传产物到Release
-          files: release-files/*.ipk
-          # 设为预发布（可选，避免误触正式版）
-          prerelease: true
+      - name: Setup dependencies
         env:
-          # GitHub自动生成的Token，无需手动配置
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E rm -rf /var/lib/man-db/auto-update
+          sudo -E apt-get update -qq
+          # 修复：补全缺失的依赖（liblua5.1-dev、jsonfilter、zlib1g-dev）
+          sudo -E apt-get install -y \
+            build-essential curl fakeroot libssl-dev lua5.1 liblua5.1-dev \
+            meson ninja-build zlib1g-dev jsonfilter gettext
+
+          # 修复：apk-tools编译适配ubuntu最新版本
+          pushd apk-tools
+          meson setup build \
+            -Db_lto=true \
+            -Dcompressed-help=false \
+            -Ddocs=disabled \
+            -Dhelp=enabled \
+            -Dlua_version=5.1 \
+            -Ddefault_library=static \
+            -Durl_backend=wget \
+            -Dzstd=false \
+            -Dpython=disabled \
+            -Dtests=disabled \
+            -Dcrypto_backend=openssl
+          ninja -C build
+          sudo -E meson install -C build --strip
+          popd
+
+          # 修复：po2lmo编译（补全依赖+显式指定CC）
+          pushd po2lmo/modules/luci-base/src
+          CC=gcc make po2lmo
+          sudo -E install -m0755 -s po2lmo /usr/local/bin/po2lmo
+          popd
+
+          # 修复：ipkg-build脚本权限+路径
+          curl -fLO "https://raw.githubusercontent.com/openwrt/openwrt/master/scripts/ipkg-build"
+          chmod +x ipkg-build
+          sudo install -m0755 ipkg-build /usr/local/bin/ipkg-build
+
+      - name: Build ipk file
+        run: |
+          pushd .github
+          # 修复：fakeroot权限传递
+          sudo chmod +x build-ipk.sh
+          fakeroot bash -c "export PATH=/usr/local/bin:\$PATH; ./build-ipk.sh apk "${{ github.event_name }}""
+          fakeroot bash -c "export PATH=/usr/local/bin:\$PATH; ./build-ipk.sh ipk "${{ github.event_name }}""
+          echo "APK_ASSET_NAME=$(ls *.apk)" >> $GITHUB_ENV
+          echo "IPK_ASSET_NAME=$(ls *.ipk)" >> $GITHUB_ENV
+          popd
+
+      - name: Publishing APK files to GitHub Artifacts
+        uses: actions/upload-artifact@v4
+        if: github.event_name != 'release'
+        with:
+          name: ${{ env.APK_ASSET_NAME }}
+          path: .github/${{ env.APK_ASSET_NAME }}
+
+      - name: Publishing IPK files to GitHub Artifacts
+        uses: actions/upload-artifact@v4
+        if: github.event_name != 'release'
+        with:
+          name: ${{ env.IPK_ASSET_NAME }}
+          path: .github/${{ env.IPK_ASSET_NAME }}
+
+      - name: Publishing to GitHub Releases
+        uses: svenstaro/upload-release-action@v2
+        if: github.event_name == 'release'
+        with:
+          repo_token: ${{ github.token }}
+          file: .github/luci-app-homeproxy_*.*
+          file_glob: true
+          tag: ${{ github.ref }}
