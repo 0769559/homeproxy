@@ -1,144 +1,92 @@
-name: Build ipk for HomeProxy
+name: Build ImmortalWRT IPK (ipq60xx/aarch64)
 
 on:
-  # 保留手动触发（核心，支持指定7c7badc/架构等参数）
   workflow_dispatch:
     inputs:
       immortalwrt_branch:
-        description: 'ImmortalWRT 分支（如 immortalwrt-23.05）'
+        description: 'ImmortalWRT 分支（适配你的版本：openwrt-23.05 或 master）'
         required: true
         default: 'openwrt-23.05'
-      homeproxy_commit:
-        description: 'HomeProxy Commit Hash（如 7c7badc）'
-        required: true
-        default: '7c7badc'
+      immortalwrt_commit:
+        description: '源码Commit（留空则用分支最新版，你的系统是267ca5a）'
+        required: false
+        default: '267ca5a'
       target_arch:
-        description: '目标架构（如 aarch64_generic/qualcommax_ipq60xx）'
+        description: '目标架构（你的硬件：qualcommax/ipq60xx）'
         required: true
-        default: 'aarch64_generic'
+        default: 'qualcommax/ipq60xx'
+      homeproxy_commit:
+        description: 'HomeProxy提交哈希（7c7badc）'
+        required: false
+        default: '7c7badc'  # 新增HomeProxy提交参数，方便修改
 
 jobs:
-  build:
+  build-ipk:
     runs-on: ubuntu-22.04
     steps:
-      - name: Checkout
+      - name: Set up job
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Install Complete Dependencies（修复编译依赖缺失）
+      - name: Install Complete Dependencies
         run: |
-          sudo apt update
-          # 移除不存在的jsonfilter，保留核心依赖，跳过upgrade减少耗时
-          sudo apt install -y build-essential clang flex bison g++ gawk gcc-multilib \
-          gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev \
-          file wget curl meson ninja-build liblua5.1-dev zlib1g-dev fakeroot \
-          libssl-dev lua5.1 gettext-base
+          sudo apt update -y
+          sudo apt install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+          gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev file wget \
+          libelf-dev libtool-bin autoconf automake texinfo patch pkg-config curl swig
+
+      - name: Validate ImmortalWRT Branch
+        run: |
+          ALLOWED_BRANCHES=("openwrt-23.05" "master" "openwrt-24.03")
+          if [[ ! " ${ALLOWED_BRANCHES[@]} " =~ " ${{ github.event.inputs.immortalwrt_branch }} " ]]; then
+            echo "错误：不支持的分支名！允许的分支：${ALLOWED_BRANCHES[*]}"
+            exit 1
+          fi
 
       - name: Clone ImmortalWRT Source + Fix HomeProxy Feed
         run: |
           mkdir -p immortalwrt && cd immortalwrt
-          # 克隆指定分支的ImmortalWRT源码
-          git clone -b ${{ github.event.inputs.immortalwrt_branch }} https://github.com/immortalwrt/immortalwrt.git .
-          # 锁定7c7badc Commit（你的核心需求）
-          echo "src-git homeproxy https://github.com/immortalwrt/homeproxy.git;${{ github.event.inputs.homeproxy_commit }}" >> feeds.conf.default
-          # 双镜像源加速（修复依赖下载失败）
-          sed -i 's#downloads.immortalwrt.org#mirrors.pku.edu.cn/immortalwrt#' ./feeds.conf.default
-          sed -i 's#downloads.openwrt.org#mirrors.tuna.tsinghua.edu.cn/openwrt#' ./feeds.conf.default
-          # 更新feeds（增加重试机制）
-          ./scripts/feeds update -a || ./scripts/feeds update -a -f
-          ./scripts/feeds install -a
-
-      - name: Configure Build（适配目标架构，修复架构不匹配）
-        run: |
-          cd immortalwrt
-          # 根据输入的架构动态配置（兼容aarch64/qualcommax_ipq60xx等）
-          if [[ "${{ github.event.inputs.target_arch }}" == "qualcommax_ipq60xx" ]]; then
-            # 适配你的qualcommax/ipq60xx设备
-            echo "CONFIG_TARGET_qualcommax=y
-            CONFIG_TARGET_qualcommax_ipq60xx=y
-            CONFIG_TARGET_qualcommax_ipq60xx_JDCloud_RE-CS-02=y
-            # 启用HomeProxy及完整依赖
-            CONFIG_PACKAGE_luci-app-homeproxy=m
-            CONFIG_PACKAGE_homeproxy=m
-            CONFIG_PACKAGE_sing-box=m
-            CONFIG_PACKAGE_v2ray-geodata=m
-            CONFIG_PACKAGE_luci-compat=m
-            CONFIG_PACKAGE_ip-full=m
-            CONFIG_PACKAGE_kmod-tun=m
-            # 编译优化
-            CONFIG_BUILD_OPTIMIZE=y
-            CONFIG_STRIP_ALL=y" > .config
-          else
-            # 默认适配aarch64_generic（ARMv8）
-            echo "CONFIG_TARGET_armvirt=y
-            CONFIG_TARGET_armvirt_64=y
-            CONFIG_TARGET_armvirt_64_Default=y
-            # 启用HomeProxy及完整依赖
-            CONFIG_PACKAGE_luci-app-homeproxy=m
-            CONFIG_PACKAGE_homeproxy=m
-            CONFIG_PACKAGE_sing-box=m
-            CONFIG_PACKAGE_v2ray-geodata=m
-            CONFIG_PACKAGE_luci-compat=m
-            CONFIG_PACKAGE_ip-full=m
-            CONFIG_PACKAGE_kmod-tun=m
-            # 编译优化
-            CONFIG_BUILD_OPTIMIZE=y
-            CONFIG_STRIP_ALL=y" > .config
+          # 克隆正确的ImmortalWRT分支
+          git clone --depth=1 --branch=${{ github.event.inputs.immortalwrt_branch }} https://github.com/immortalwrt/immortalwrt.git .
+          if [ -n "${{ github.event.inputs.immortalwrt_commit }}" ]; then
+            git checkout ${{ github.event.inputs.immortalwrt_commit }}
           fi
           
-          # 加载配置并验证（修复配置加载失败）
+          # 修复HomeProxy Feed：使用正确的提交哈希格式
+          sed -i '/homeproxy/d' feeds.conf.default
+          # 核心修复：用^分隔仓库和提交哈希，适配7c7badc这个提交
+          echo "src-git homeproxy https://github.com/immortalwrt/homeproxy.git^${{ github.event.inputs.homeproxy_commit }}" >> feeds.conf.default
+          
+          # 更新feeds（增加容错，避免单feed失败阻断流程）
+          ./scripts/feeds update -a || true
+          # 强制安装homeproxy feeds
+          ./scripts/feeds install -a
+          ./scripts/feeds install homeproxy
+
+      - name: Configure Build (适配ipq60xx架构)
+        run: |
+          cd immortalwrt
+          cp configs/immortalwrt-${{ github.event.inputs.target_arch }}.config .config
           make defconfig
 
-      - name: Download Dependencies（增加容错）
+      - name: Download Dependencies (增加容错)
         run: |
           cd immortalwrt
-          # 依赖下载失败自动重试（修复下载超时）
-          make download -j$(nproc) || make download -j1 V=s
+          make download -j$(nproc)
+          find dl -size -1024c -exec ls -l {} \;
+          find dl -size -1024c -exec rm -f {} \;
 
-      - name: Compile po2lmo（修复po2lmo缺失）
+      - name: Compile IPK (修复po2lmo缺失)
         run: |
           cd immortalwrt
-          # 手动编译po2lmo（解决HomeProxy编译依赖）
-          git clone https://github.com/openwrt/luci.git po2lmo_temp
-          cd po2lmo_temp/modules/luci-base/src
-          make po2lmo
-          sudo cp po2lmo /usr/local/bin/
-          cd ../../../../ && rm -rf po2lmo_temp
-
-      - name: Build HomeProxy（显示详细日志，便于排错）
-        run: |
-          cd immortalwrt
-          # 编译HomeProxy（单线程编译减少报错，新手友好）
-          make package/luci-app-homeproxy/compile V=s -j1
-          make package/homeproxy/compile V=s -j1
-
-      - name: Prepare Release Files
-        run: |
-          mkdir -p release-files
-          # 兼容不同架构的ipk路径
-          cp immortalwrt/bin/packages/**/luci-app-homeproxy_*.ipk release-files/ || true
-          cp immortalwrt/bin/packages/**/homeproxy_*.ipk release-files/ || true
-          ls -l release-files/
+          # 预编译po2lmo工具
+          pushd feeds/packages/utils/po2lmo
+          make && sudo make install
+          popd
+          # 编译IPK
+          make package/compile -j$(nproc) CONFIG_TARGET=${{ github.event.inputs.target_arch }} V=s
 
       - name: Upload IPK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: homeproxy-${{ github.event.inputs.target_arch }}-${{ github.event.inputs.homeproxy_commit }}
-          path: release-files/*.ipk
-          retention-days: 90
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: homeproxy-${{ github.event.inputs.homeproxy_commit }}-${{ github.event.inputs.target_arch }}
-          name: HomeProxy ${{ github.event.inputs.homeproxy_commit }} (${{ github.event.inputs.target_arch }})
-          body: |
-            🚀 编译完成的 HomeProxy IPK 包
-            - Commit Hash: ${{ github.event.inputs.homeproxy_commit }}
-            - 架构: ${{ github.event.inputs.target_arch }}
-            - ImmortalWRT 分支: ${{ github.event.inputs.immortalwrt_branch }}
-          files: release-files/*.ipk
-          prerelease: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: immortalwrt-ipk-${{ github.event.inputs.target_arch }}
+          path: immortalwrt/bin/packages/aarch64_cortex-a53/
