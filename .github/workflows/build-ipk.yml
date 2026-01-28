@@ -8,7 +8,7 @@ on:
         required: true
         default: 'openwrt-23.05'
       immortalwrt_commit:
-        description: '源码Commit（留空用分支最新版，267ca5a仅本地有效）'
+        description: '源码Commit（留空用分支最新版）'
         required: false
         default: ''
       target_arch:
@@ -44,9 +44,14 @@ jobs:
 
       - name: Clone ImmortalWRT Source + Fix HomeProxy Feed
         run: |
-          mkdir -p immortalwrt && cd immortalwrt
-          git clone --branch=${{ github.event.inputs.immortalwrt_branch }} https://github.com/immortalwrt/immortalwrt.git .
+          # 重新创建目录并完整克隆源码（避免目录缺失）
+          rm -rf immortalwrt && mkdir -p immortalwrt && cd immortalwrt
+          # 完整克隆仓库，确保所有目录/文件都存在
+          git clone https://github.com/immortalwrt/immortalwrt.git .
+          # 切换到指定分支
+          git checkout ${{ github.event.inputs.immortalwrt_branch }}
           
+          # 仅当commit有效时切换（保留校验）
           if [ -n "${{ github.event.inputs.immortalwrt_commit }}" ]; then
             if git rev-parse --verify ${{ github.event.inputs.immortalwrt_commit }} >/dev/null 2>&1; then
               git checkout ${{ github.event.inputs.immortalwrt_commit }}
@@ -55,42 +60,54 @@ jobs:
             fi
           fi
           
+          # 配置HomeProxy Feed（保留正确格式）
           sed -i '/homeproxy/d' feeds.conf.default
           echo "src-git homeproxy https://github.com/immortalwrt/homeproxy.git^${{ github.event.inputs.homeproxy_commit }}" >> feeds.conf.default
           
+          # 更新并安装feeds
           ./scripts/feeds update -a || true
           ./scripts/feeds install -a
           ./scripts/feeds install homeproxy
 
-      - name: Configure Build (适配ipq60xx架构)
+      - name: Configure Build (适配ipq60xx架构，彻底放弃configs目录)
         run: |
           cd immortalwrt
-          # 核心修复：
-          # 1. 先列出configs目录下的所有配置文件，确认存在的文件（调试用）
-          ls -la configs/
-          # 2. 修复配置文件路径：用通用方式生成ipq60xx配置，而非直接复制不存在的文件
-          # 替换原有的cp命令，改用make menuconfig生成适配配置
-          echo "CONFIG_TARGET_qualcommax=y" > .config
-          echo "CONFIG_TARGET_qualcommax_ipq60xx=y" >> .config
-          echo "CONFIG_TARGET_BOARD=\"qualcommax\"" >> .config
-          echo "CONFIG_TARGET_SUBTARGET=\"ipq60xx\"" >> .config
-          # 生成默认配置
+          # 完全手动生成ipq60xx架构配置，不依赖任何预配置文件
+          # 清空原有config（如有）
+          rm -f .config
+          # 写入qualcommax/ipq60xx核心配置
+          cat > .config << EOF
+          CONFIG_TARGET_qualcommax=y
+          CONFIG_TARGET_qualcommax_ipq60xx=y
+          CONFIG_TARGET_DEVICE_qualcommax_ipq60xx_DEVICE_generic=y
+          CONFIG_TARGET_BOARD="qualcommax"
+          CONFIG_TARGET_SUBTARGET="ipq60xx"
+          CONFIG_ARCH_PACKAGES="aarch64_cortex-a53"
+          CONFIG_CPU_TYPE="cortex-a53"
+          # 启用IPK编译模式，仅编译软件包
+          CONFIG_DEVEL=y
+          CONFIG_BUILD_IPK=y
+          EOF
+          # 生成最终配置（自动补全依赖）
           make defconfig
 
       - name: Download Dependencies (增加容错)
         run: |
           cd immortalwrt
           make download -j$(nproc)
+          # 清理无效依赖文件
           find dl -size -1024c -exec ls -l {} \;
           find dl -size -1024c -exec rm -f {} \;
 
       - name: Compile IPK (修复po2lmo缺失)
         run: |
           cd immortalwrt
-          pushd feeds/packages/utils/po2lmo
+          # 预编译po2lmo工具
+          pushd feeds/packages/utils/po2lmo || true
           make && sudo make install
           popd
-          make package/compile -j$(nproc) CONFIG_TARGET=${{ github.event.inputs.target_arch }} V=s
+          # 编译IPK，指定架构
+          make package/compile -j$(nproc) V=s
 
       - name: Upload IPK Artifact
         uses: actions/upload-artifact@v4
