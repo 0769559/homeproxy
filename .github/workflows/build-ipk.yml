@@ -4,19 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       immortalwrt_branch:
-        description: 'ImmortalWRT 分支（推荐：openwrt-23.05 / master）'
+        description: 'ImmortalWRT 分支'
         required: true
         default: 'openwrt-23.05'
-      immortalwrt_commit:
-        description: '源码Commit（留空用分支最新版）'
-        required: false
-        default: ''
-      target_arch:
-        description: '目标架构（你的硬件：qualcommax/ipq60xx）'
-        required: true
-        default: 'qualcommax/ipq60xx'
       homeproxy_commit:
-        description: 'HomeProxy提交哈希（有效值：7c7badc）'
+        description: 'HomeProxy提交哈希'
         required: false
         default: '7c7badc'
 
@@ -24,93 +16,57 @@ jobs:
   build-ipk:
     runs-on: ubuntu-22.04
     steps:
-      - name: Set up job
-        uses: actions/checkout@v4
-
-      - name: Install Complete Dependencies
+      # 1. 基础环境初始化（仅保留必要步骤）
+      - name: Install Dependencies
         run: |
           sudo apt update -y
           sudo apt install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
           gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev file wget \
           libelf-dev libtool-bin autoconf automake texinfo patch pkg-config curl swig
 
-      - name: Validate ImmortalWRT Branch
+      # 2. 克隆源码 + 配置HomeProxy Feed（移除所有校验）
+      - name: Clone Source & Configure Feed
         run: |
-          ALLOWED_BRANCHES=("openwrt-23.05" "master" "openwrt-24.03")
-          if [[ ! " ${ALLOWED_BRANCHES[@]} " =~ " ${{ github.event.inputs.immortalwrt_branch }} " ]]; then
-            echo "错误：不支持的分支名！允许的分支：${ALLOWED_BRANCHES[*]}"
-            exit 1
-          fi
-
-      - name: Clone ImmortalWRT Source + Fix HomeProxy Feed
-        run: |
-          # 重新创建目录并完整克隆源码（避免目录缺失）
           rm -rf immortalwrt && mkdir -p immortalwrt && cd immortalwrt
-          # 完整克隆仓库，确保所有目录/文件都存在
-          git clone https://github.com/immortalwrt/immortalwrt.git .
-          # 切换到指定分支
-          git checkout ${{ github.event.inputs.immortalwrt_branch }}
-          
-          # 仅当commit有效时切换（保留校验）
-          if [ -n "${{ github.event.inputs.immortalwrt_commit }}" ]; then
-            if git rev-parse --verify ${{ github.event.inputs.immortalwrt_commit }} >/dev/null 2>&1; then
-              git checkout ${{ github.event.inputs.immortalwrt_commit }}
-            else
-              echo "警告：提交${{ github.event.inputs.immortalwrt_commit }}不存在，使用分支最新版"
-            fi
-          fi
-          
-          # 配置HomeProxy Feed（保留正确格式）
+          # 直接克隆分支，无任何校验
+          git clone --branch=${{ github.event.inputs.immortalwrt_branch }} https://github.com/immortalwrt/immortalwrt.git .
+          # 配置HomeProxy Feed（仅保留核心格式）
           sed -i '/homeproxy/d' feeds.conf.default
           echo "src-git homeproxy https://github.com/immortalwrt/homeproxy.git^${{ github.event.inputs.homeproxy_commit }}" >> feeds.conf.default
-          
-          # 更新并安装feeds
-          ./scripts/feeds update -a || true
+          # 更新feeds（无容错，直接执行）
+          ./scripts/feeds update -a
           ./scripts/feeds install -a
-          ./scripts/feeds install homeproxy
 
-      - name: Configure Build (适配ipq60xx架构，彻底放弃configs目录)
+      # 3. 配置编译（纯手动生成ipq60xx配置，无文件依赖）
+      - name: Configure Build
         run: |
           cd immortalwrt
-          # 完全手动生成ipq60xx架构配置，不依赖任何预配置文件
-          # 清空原有config（如有）
-          rm -f .config
-          # 写入qualcommax/ipq60xx核心配置
+          # 直接写入ipq60xx架构核心配置，无任何目录/文件校验
           cat > .config << EOF
           CONFIG_TARGET_qualcommax=y
           CONFIG_TARGET_qualcommax_ipq60xx=y
           CONFIG_TARGET_DEVICE_qualcommax_ipq60xx_DEVICE_generic=y
-          CONFIG_TARGET_BOARD="qualcommax"
-          CONFIG_TARGET_SUBTARGET="ipq60xx"
           CONFIG_ARCH_PACKAGES="aarch64_cortex-a53"
-          CONFIG_CPU_TYPE="cortex-a53"
-          # 启用IPK编译模式，仅编译软件包
           CONFIG_DEVEL=y
-          CONFIG_BUILD_IPK=y
           EOF
-          # 生成最终配置（自动补全依赖）
           make defconfig
 
-      - name: Download Dependencies (增加容错)
+      # 4. 下载依赖 + 编译IPK（移除多余清理/调试）
+      - name: Compile IPK
         run: |
           cd immortalwrt
+          # 下载依赖
           make download -j$(nproc)
-          # 清理无效依赖文件
-          find dl -size -1024c -exec ls -l {} \;
-          find dl -size -1024c -exec rm -f {} \;
-
-      - name: Compile IPK (修复po2lmo缺失)
-        run: |
-          cd immortalwrt
-          # 预编译po2lmo工具
-          pushd feeds/packages/utils/po2lmo || true
+          # 预编译po2lmo（仅核心命令）
+          pushd feeds/packages/utils/po2lmo
           make && sudo make install
           popd
-          # 编译IPK，指定架构
+          # 编译IPK
           make package/compile -j$(nproc) V=s
 
-      - name: Upload IPK Artifact
+      # 5. 上传产物（保留核心功能）
+      - name: Upload IPK
         uses: actions/upload-artifact@v4
         with:
-          name: immortalwrt-ipk-${{ github.event.inputs.target_arch }}
+          name: immortalwrt-ipk-ipq60xx
           path: immortalwrt/bin/packages/aarch64_cortex-a53/
